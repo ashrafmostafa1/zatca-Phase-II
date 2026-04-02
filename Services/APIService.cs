@@ -1,7 +1,9 @@
 using System;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Zatca_Phase_II.Helpers;
 using Zatca_Phase_II.Models;
 
@@ -215,17 +217,8 @@ public class APIService
         HttpResponseMessage response = await _httpClient.PostAsync(zatcaClearance, content);
         string responseBody = await response.Content.ReadAsStringAsync();
         Console.WriteLine("[API#2] Clearance Response: " + responseBody);
-        if (!response.IsSuccessStatusCode)
-        {
-            LogsFile.MessageZatca(
-                $"[API#2] Clearance failed: {response.StatusCode}, {responseBody}"
-            );
-            return null;
-        }
-        LogsFile.MessageZatca(
-            $"[API#2] Clearance success: {response.StatusCode}"
-        );
-        return JsonSerializer.Deserialize<TestUploadResponse>(responseBody);
+
+        return ParseInvoiceResponse(response.StatusCode, responseBody, "[API#2] Clearance");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -258,16 +251,86 @@ public class APIService
         HttpResponseMessage response = await _httpClient.PostAsync(zatcaUpload, content);
         string responseBody = await response.Content.ReadAsStringAsync();
         Console.WriteLine("[API#1] Reporting Response: " + responseBody);
-        if (!response.IsSuccessStatusCode)
+
+        return ParseInvoiceResponse(response.StatusCode, responseBody, "[API#1] Reporting");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Shared helper — parses ZATCA invoice response for both Reporting & Clearance.
+    // Returns the parsed result even on HTTP 400 (duplicate or validation error),
+    // and sets IsDuplicate = true when error code IVS-DUP-001 is detected.
+    // Returns null only for unexpected non-400 failures (5xx, network errors, etc.)
+    // ─────────────────────────────────────────────────────────────────────────
+    private static TestUploadResponse? ParseInvoiceResponse(
+        HttpStatusCode statusCode,
+        string responseBody,
+        string apiLabel
+    )
+    {
+        // Always try to parse — ZATCA sends useful body on 400 too
+        TestUploadResponse? result = null;
+        try
+        {
+            var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            result = JsonSerializer.Deserialize<TestUploadResponse>(responseBody, opts);
+        }
+        catch
+        {
+            // Body was not valid JSON — fall through
+        }
+
+        if (result == null)
+        {
+            // Could not parse — only happens on 5xx / gateway errors
+            if ((int)statusCode >= 500)
+            {
+                LogsFile.MessageZatca($"{apiLabel} server error {statusCode}: {responseBody}");
+                return null;
+            }
+            result = new TestUploadResponse();
+        }
+
+        result.HttpStatus   = statusCode;
+        result.RawResponse  = responseBody;
+
+        // Detect duplicate: ZATCA error code IVS-DUP-001
+        bool isDuplicate = ContainsDuplicateError(responseBody);
+        result.IsDuplicate = isDuplicate;
+
+        if (isDuplicate)
         {
             LogsFile.MessageZatca(
-                $"[API#1] Reporting failed: {response.StatusCode}, {responseBody}"
+                $"{apiLabel}: DUPLICATE invoice detected (IVS-DUP-001). " +
+                $"The invoice was already submitted. Returning existing result."
             );
-            return null;
+            // Return the result — the caller can decide whether to treat this as success
+            return result;
         }
-        LogsFile.MessageZatca(
-            $"[API#1] Reporting success: {response.StatusCode}"
-        );
-        return JsonSerializer.Deserialize<TestUploadResponse>(responseBody);
+
+        if (!IsSuccessStatus(statusCode))
+        {
+            LogsFile.MessageZatca($"{apiLabel} failed [{statusCode}]: {responseBody}");
+            // Still return the parsed result (not null) so the caller sees ValidationResults
+            return result;
+        }
+
+        LogsFile.MessageZatca($"{apiLabel} success [{statusCode}]");
+        return result;
+    }
+
+    private static bool IsSuccessStatus(HttpStatusCode code) =>
+        (int)code >= 200 && (int)code <= 299;
+
+    /// <summary>
+    /// Checks whether the ZATCA response body contains a duplicate-invoice error.
+    /// ZATCA uses error code "IVS-DUP-001" and category "IVS" for duplicates.
+    /// The check is case-insensitive and works against both structured and raw JSON.
+    /// </summary>
+    private static bool ContainsDuplicateError(string responseBody)
+    {
+        if (string.IsNullOrWhiteSpace(responseBody)) return false;
+        // Fast path: look for the known duplicate code string
+        return responseBody.Contains("IVS-DUP-001", StringComparison.OrdinalIgnoreCase)
+            || responseBody.Contains("DUPLICATE", StringComparison.OrdinalIgnoreCase);
     }
 }
