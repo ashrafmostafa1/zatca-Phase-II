@@ -87,6 +87,7 @@ public static class ServiceCollectionExtensions
 
         // Application: e-invoice orchestrator
         services.AddScoped<IEInvoiceService, EInvoiceService>();
+        services.AddScoped<ZatcaRoutingService>();
 
         // Outbox: singleton so all scopes share the same channel
         services.AddSingleton<IOutboxEInvoiceService, InMemoryOutboxService>();

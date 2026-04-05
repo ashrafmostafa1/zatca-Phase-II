@@ -9,6 +9,7 @@ public class TestUploadResponse
     public object ClearanceStatus  { get; set; } = new object();
     public object QrSellerStatus   { get; set; } = new object();
     public object QrBuyerStatus    { get; set; } = new object();
+    public string? ClearedInvoice  { get; set; }
 
     // ── Duplicate / error enrichment ──────────────────────────────────────
     /// <summary>HTTP status code returned by ZATCA.</summary>

@@ -19,6 +19,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Zatca.Phase2.Tests\**" />
+    <Compile Remove="Zatca.Phase2.Tests2\**" />
+    <EmbeddedResource Remove="Zatca.Phase2.Tests\**" />
+    <EmbeddedResource Remove="Zatca.Phase2.Tests2\**" />
+    <None Remove="Zatca.Phase2.Tests\**" />
+    <None Remove="Zatca.Phase2.Tests2\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="ZATCA.EInvoice.SDK.Contracts">
       <HintPath>Zatca/ZATCA.EInvoice.SDK.Contracts.dll</HintPath>
     </Reference>
