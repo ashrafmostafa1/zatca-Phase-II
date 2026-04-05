@@ -38,4 +38,11 @@ public class Bill
     public string ParentCode { get; set; } = string.Empty;
     public CustomerORSupplier Customer { get; set; } = new CustomerORSupplier();
     public CustomerORSupplier Supplier { get; set; } = new CustomerORSupplier();
+
+    /// <summary>
+    /// The cryptographic hash (Base64 SHA-256) of the previously submitted signed invoice XML.
+    /// ZATCA requires this as the PIH (Previous Invoice Hash) element.
+    /// Leave empty for the very first invoice — the library will use the ZATCA seed hash.
+    /// </summary>
+    public string PreviousInvoiceHash { get; set; } = string.Empty;
 }

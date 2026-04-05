@@ -94,10 +94,15 @@ namespace Zatca_Phase_II.Helpers
                     new XElement(nsCbc + "UUID", x.Code)
                 );
 
-                // PIH: hash of invoice N-1. If Code is numeric use Code-1, otherwise hash "0" as seed.
-                string prevCodeHash = int.TryParse(x.Code, out var codeNum) && codeNum > 1
-                    ? HashHelper.ComputeSha256((codeNum - 1).ToString())
-                    : HashHelper.ComputeSha256("0");
+                // PIH: use the real hash of the previously submitted signed invoice.
+                // If this is the first invoice (PreviousInvoiceHash is empty / not set),
+                // fall back to the ZATCA-defined seed hash for invoice 1.
+                // The caller is responsible for persisting HashXML from each Fatoora result
+                // and passing it back as Bill.PreviousInvoiceHash on the next invoice.
+                string pih = !string.IsNullOrWhiteSpace(x.PreviousInvoiceHash)
+                    ? x.PreviousInvoiceHash
+                    : HashHelper.ComputeSha256("0"); // ZATCA seed hash for first invoice
+
                 XElement PIH = new XElement(
                     nsCac + "AdditionalDocumentReference",
                     new XElement(nsCbc + "ID", "PIH"),
@@ -105,11 +110,12 @@ namespace Zatca_Phase_II.Helpers
                         nsCac + "Attachment",
                         new XElement(
                             nsCbc + "EmbeddedDocumentBinaryObject",
-                            prevCodeHash,
+                            pih,
                             new XAttribute(TextPlain)
                         )
                     )
                 );
+
 
                 XElement AccountingSupplierParty = new XElement(
                     nsCac + "AccountingSupplierParty",
