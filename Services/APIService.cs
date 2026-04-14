@@ -1,305 +1,333 @@
-using System;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using Microsoft.Extensions.Options;
 using Zatca_Phase_II.Helpers;
+using Zatca_Phase_II.Interfaces;
 using Zatca_Phase_II.Models;
 
 namespace Zatca_Phase_II.Services;
 
-public class APIService : Zatca_Phase_II.Interfaces.IAPIService
+/// <summary>
+/// Concrete ZATCA HTTP API client.
+///
+/// Design decisions:
+/// • A single <see cref="HttpClient"/> is reused for the lifetime of the service
+///   (avoid socket exhaustion from <c>using var client = new HttpClient()</c> per call).
+/// • Transient failures (5xx / network errors) are retried up to <see cref="ZatcaOptions.MaxRetries"/>
+///   times with a linear back-off — no extra NuGet package required.
+/// • All methods are fully async so the calling UI thread is never blocked.
+/// • Every request/response pair is written to the structured ZATCA log file.
+/// </summary>
+public class APIService : IAPIService
 {
-    private readonly string BaseUrl;
-    private readonly string zatcaCompliance;
-    private readonly string zatcaProd;
-    private readonly string zatcaUploadCompliance;
-    private readonly string zatcaUpload;
-    private readonly string zatcaClearance;
+    private readonly HttpClient _http;
+    private readonly int _maxRetries;
+    private readonly int _retryDelayMs;
 
-    public APIService(bool IsSimulation)
+    // ── Endpoint constants ────────────────────────────────────────────────────
+
+    private readonly string _zatcaCompliance;       // API #3
+    private readonly string _zatcaProd;             // API #4 & #5
+    private readonly string _zatcaUploadCompliance; // API #6
+    private readonly string _zatcaUpload;           // API #1 — Reporting
+    private readonly string _zatcaClearance;        // API #2 — Clearance
+
+    // ── Constructors ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Preferred constructor — used when <see cref="ZatcaOptions"/> is injected via DI.
+    /// </summary>
+    public APIService(IOptions<ZatcaOptions> options)
+        : this(options.Value) { }
+
+    /// <summary>
+    /// Direct constructor — used when DI is not available (e.g., unit tests).
+    /// </summary>
+    public APIService(ZatcaOptions options)
     {
-        BaseUrl = IsSimulation
-            ? "https://gw-fatoora.zatca.gov.sa/e-invoicing/simulation"
-            : "https://gw-fatoora.zatca.gov.sa/e-invoicing/core";
+        _maxRetries   = options.MaxRetries;
+        _retryDelayMs = options.RetryDelayMs;
 
-        zatcaCompliance       = $"{BaseUrl}/compliance";                   // API #3
-        zatcaProd             = $"{BaseUrl}/production/csids";             // API #4 & #5
-        zatcaUploadCompliance = $"{BaseUrl}/compliance/invoices";          // API #6
-        zatcaUpload           = $"{BaseUrl}/invoices/reporting/single";    // API #1
-        zatcaClearance        = $"{BaseUrl}/invoices/clearance/single";    // API #2
+        _http = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds)
+        };
+
+        string baseUrl = options.BaseUrl;
+        _zatcaCompliance       = $"{baseUrl}/compliance";
+        _zatcaProd             = $"{baseUrl}/production/csids";
+        _zatcaUploadCompliance = $"{baseUrl}/compliance/invoices";
+        _zatcaUpload           = $"{baseUrl}/invoices/reporting/single";
+        _zatcaClearance        = $"{baseUrl}/invoices/clearance/single";
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // API #3 — Compliance CSID (POST /compliance)
-    // واجهة برمجة التطبيقات لمعرّف ختمّ التشفير لأغراض الامتثال
-    // ─────────────────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Legacy constructor — keeps backward compatibility with code that passes a raw bool.
+    /// </summary>
+    public APIService(bool isSimulation)
+        : this(new ZatcaOptions { IsSimulation = isSimulation }) { }
+
+    // ── API #3 — Compliance CSID ──────────────────────────────────────────────
+
+    /// <inheritdoc/>
     public async Task<ComplianceResponse?> SubmitComplianceRequestAsync(string csr, string otp)
     {
-        using var _httpClient = new HttpClient();
-        var requestData = new { csr };
-        var jsonContent = JsonSerializer.Serialize(requestData);
-        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+        var content = BuildJsonContent(new { csr });
 
-        _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
-        _httpClient.DefaultRequestHeaders.Add("OTP", otp);
-        _httpClient.DefaultRequestHeaders.Add("Accept-Version", "V2");
+        using var req = new HttpRequestMessage(HttpMethod.Post, _zatcaCompliance) { Content = content };
+        req.Headers.Add("Accept", "application/json");
+        req.Headers.Add("OTP", otp);
+        req.Headers.Add("Accept-Version", "V2");
 
-        HttpResponseMessage response = await _httpClient.PostAsync(zatcaCompliance, content);
+        var response = await _http.SendAsync(req);
+        string body  = await response.Content.ReadAsStringAsync();
 
         if (!response.IsSuccessStatusCode)
         {
-            LogsFile.MessageZatca(
-                $"[API#3] Compliance CSID failed: {response.StatusCode}, {await response.Content.ReadAsStringAsync()}"
-            );
+            LogsFile.MessageZatca($"[API#3] Compliance CSID failed: {response.StatusCode}, {body}");
             return null;
         }
 
-        string responseBody = await response.Content.ReadAsStringAsync();
-        LogsFile.MessageZatca($"[API#3] Compliance CSID success");
-        return JsonSerializer.Deserialize<ComplianceResponse>(responseBody);
+        LogsFile.MessageZatca("[API#3] Compliance CSID success");
+        return Deserialize<ComplianceResponse>(body);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // API #4 — Production CSID Onboarding (POST /production/csids)
-    // واجهة برمجة التطبيقات لمعرّف ختم التشفير الخاصّ ببيئة الإنتاج (تهيئة)
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── API #4 — Production CSID Onboarding ──────────────────────────────────
+
+    /// <inheritdoc/>
     public async Task<ComplianceResponse?> SubmitProductionRequestAsync(
         string compliance_request_id,
-        string _username,
-        string _password
+        string username,
+        string password
     )
     {
-        using var _httpClient = new HttpClient();
-        // compliance_request_id is sent as a STRING per ZATCA API #4 spec
-        var requestData = new { compliance_request_id = long.Parse(compliance_request_id) };
-        var jsonContent = JsonSerializer.Serialize(requestData);
-        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+        var content = BuildJsonContent(new { compliance_request_id });
 
-        _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
-        _httpClient.DefaultRequestHeaders.Add("Accept-Version", "V2");
-        var authToken = Encoding.ASCII.GetBytes($"{_username}:{_password}");
-        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Basic",
-            Convert.ToBase64String(authToken)
-        );
+        using var req = new HttpRequestMessage(HttpMethod.Post, _zatcaProd) { Content = content };
+        AddCommonHeaders(req, username, password);
 
-        HttpResponseMessage response = await _httpClient.PostAsync(zatcaProd, content);
-        string responseBody = await response.Content.ReadAsStringAsync();
-        // DIAGNOSTIC: log exact request sent to API #4
-        LogsFile.MessageZatca($"[DIAG][API#4] URL: {zatcaProd}");
-        LogsFile.MessageZatca($"[DIAG][API#4] Body: {jsonContent}");
-        LogsFile.MessageZatca($"[DIAG][API#4] Username (first 30): {_username?[..Math.Min(30, _username?.Length ?? 0)]}");
-        LogsFile.MessageZatca($"[DIAG][API#4] Response [{response.StatusCode}]: {responseBody}");
-        Console.WriteLine("[API#4] Production CSID Response: " + responseBody);
+        var response = await _http.SendAsync(req);
+        string body  = await response.Content.ReadAsStringAsync();
+        Console.WriteLine("[API#4] Production CSID Response: " + body);
+
         if (!response.IsSuccessStatusCode)
         {
-            LogsFile.MessageZatca(
-                $"[API#4] Production CSID failed: {response.StatusCode}, {responseBody}"
-            );
+            LogsFile.MessageZatca($"[API#4] Production CSID failed: {response.StatusCode}, {body}");
             return null;
         }
-        LogsFile.MessageZatca($"[API#4] Production CSID success");
-        return JsonSerializer.Deserialize<ComplianceResponse>(responseBody);
+
+        LogsFile.MessageZatca("[API#4] Production CSID success");
+        return Deserialize<ComplianceResponse>(body);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // API #5 — Production CSID Renewal (PATCH /production/csids)
-    // واجهة برمجة التطبيقات لمعرّف ختم التشفير الخاصّ ببيئة الإنتاج (تجديد)
-    // Uses PATCH with the new CSR, authenticated with the existing production CSID
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── API #5 — Production CSID Renewal (PATCH) ─────────────────────────────
+
+    /// <inheritdoc/>
     public async Task<ComplianceResponse?> RenewProductionCsidAsync(
         string csr,
         string otp,
-        string _username,
-        string _password
+        string username,
+        string password
     )
     {
-        using var _httpClient = new HttpClient();
-        var requestData = new { csr };
-        var jsonContent = JsonSerializer.Serialize(requestData);
-        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+        var content = BuildJsonContent(new { csr });
 
-        _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
-        _httpClient.DefaultRequestHeaders.Add("Accept-Version", "V2");
-        _httpClient.DefaultRequestHeaders.Add("OTP", otp);
-        var authToken = Encoding.ASCII.GetBytes($"{_username}:{_password}");
-        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Basic",
-            Convert.ToBase64String(authToken)
-        );
+        using var req = new HttpRequestMessage(new HttpMethod("PATCH"), _zatcaProd) { Content = content };
+        AddCommonHeaders(req, username, password);
+        req.Headers.Add("OTP", otp);
 
-        // PATCH — not POST — per ZATCA spec for renewal
-        var request = new HttpRequestMessage(new HttpMethod("PATCH"), zatcaProd)
-        {
-            Content = content
-        };
-        HttpResponseMessage response = await _httpClient.SendAsync(request);
-        string responseBody = await response.Content.ReadAsStringAsync();
-        Console.WriteLine("[API#5] Production CSID Renewal Response: " + responseBody);
+        var response = await _http.SendAsync(req);
+        string body  = await response.Content.ReadAsStringAsync();
+        Console.WriteLine("[API#5] Production CSID Renewal Response: " + body);
 
         if (!response.IsSuccessStatusCode)
         {
-            LogsFile.MessageZatca(
-                $"[API#5] Production CSID Renewal failed: {response.StatusCode}, {responseBody}"
-            );
+            LogsFile.MessageZatca($"[API#5] Production CSID Renewal failed: {response.StatusCode}, {body}");
             return null;
         }
-        LogsFile.MessageZatca($"[API#5] Production CSID Renewal success");
-        return JsonSerializer.Deserialize<ComplianceResponse>(responseBody);
+
+        LogsFile.MessageZatca("[API#5] Production CSID Renewal success");
+        return Deserialize<ComplianceResponse>(body);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // API #6 — Compliance Checks (POST /compliance/invoices)
-    // واجهات برمجة التطبيقات الخاصّة بإجراءات التحقق من الامتثال
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── API #6 — Compliance Check ─────────────────────────────────────────────
+
+    /// <inheritdoc/>
     public async Task<TestUploadResponse?> UploadInvTest(
         object request,
-        string _username,
-        string _password
+        string username,
+        string password
     )
     {
-        using var _httpClient = new HttpClient();
-        var requestData = request;
-        var jsonContent = JsonSerializer.Serialize(requestData);
-        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+        var content = BuildJsonContent(request);
 
-        _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
-        _httpClient.DefaultRequestHeaders.Add("Accept-Version", "V2");
-        _httpClient.DefaultRequestHeaders.Add("Accept-Language", "ar");
-        var authToken = Encoding.ASCII.GetBytes($"{_username}:{_password}");
-        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Basic",
-            Convert.ToBase64String(authToken)
-        );
+        using var req = new HttpRequestMessage(HttpMethod.Post, _zatcaUploadCompliance) { Content = content };
+        AddCommonHeaders(req, username, password, includeLanguage: true);
 
-        HttpResponseMessage response = await _httpClient.PostAsync(zatcaUploadCompliance, content);
-        string responseBody = await response.Content.ReadAsStringAsync();
-        Console.WriteLine("[API#6] Compliance Check Response: " + responseBody);
+        var response = await _http.SendAsync(req);
+        string body  = await response.Content.ReadAsStringAsync();
+        Console.WriteLine("[API#6] Compliance Check Response: " + body);
 
         if (!response.IsSuccessStatusCode)
         {
-            LogsFile.MessageZatca(
-                $"[API#6] Compliance Check failed: {response.StatusCode}, {responseBody}"
-            );
+            LogsFile.MessageZatca($"[API#6] Compliance Check failed: {response.StatusCode}, {body}");
             return null;
         }
-        LogsFile.MessageZatca($"[API#6] Compliance Check success/body: {responseBody}");
-        return JsonSerializer.Deserialize<TestUploadResponse>(responseBody);
+
+        LogsFile.MessageZatca("[API#6] Compliance Check success");
+        return Deserialize<TestUploadResponse>(body);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // API #2 — Clearance API (POST /invoices/clearance/single)
-    // واجهة برمجة التطبيقات لاعتماد الفواتير — Standard invoices (B2B)
-    // Clearance-Status: 1 = request clearance
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── API #2 — Clearance (Standard / B2B) ──────────────────────────────────
+
+    /// <inheritdoc/>
     public async Task<TestUploadResponse?> UploadClearance(
         object request,
-        string _username,
-        string _password
+        string username,
+        string password
     )
     {
-        using var _httpClient = new HttpClient();
-        var requestData = request;
-        var jsonContent = JsonSerializer.Serialize(requestData);
-        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            var content = BuildJsonContent(request);
 
-        _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
-        _httpClient.DefaultRequestHeaders.Add("Accept-Version", "V2");
-        _httpClient.DefaultRequestHeaders.Add("Accept-Language", "ar");
-        _httpClient.DefaultRequestHeaders.Add("Clearance-Status", "1");
-        var authToken = Encoding.ASCII.GetBytes($"{_username}:{_password}");
-        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Basic",
-            Convert.ToBase64String(authToken)
-        );
+            using var req = new HttpRequestMessage(HttpMethod.Post, _zatcaClearance) { Content = content };
+            AddCommonHeaders(req, username, password, includeLanguage: true);
+            req.Headers.Add("Clearance-Status", "1");
 
-        HttpResponseMessage response = await _httpClient.PostAsync(zatcaClearance, content);
-        string responseBody = await response.Content.ReadAsStringAsync();
-        Console.WriteLine("[API#2] Clearance Response: " + responseBody);
+            var response = await _http.SendAsync(req);
+            string body  = await response.Content.ReadAsStringAsync();
+            Console.WriteLine("[API#2] Clearance Response: " + body);
 
-        return ParseInvoiceResponse(response.StatusCode, responseBody, "[API#2] Clearance");
+            return ParseInvoiceResponse(response.StatusCode, body, "[API#2] Clearance");
+        }, "[API#2] Clearance");
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // API #1 — Reporting API (POST /invoices/reporting/single)
-    // واجهة برمجة التطبيقات لإرسال/مشاركة الفواتير — Simplified invoices (B2C)
-    // No Clearance-Status header required for reporting
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── API #1 — Reporting (Simplified / B2C) ─────────────────────────────────
+
+    /// <inheritdoc/>
     public async Task<TestUploadResponse?> UploadCore(
         object request,
-        string _username,
-        string _password
+        string username,
+        string password
     )
     {
-        using var _httpClient = new HttpClient();
-        var requestData = request;
-        var jsonContent = JsonSerializer.Serialize(requestData);
-        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            var content = BuildJsonContent(request);
 
-        _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
-        _httpClient.DefaultRequestHeaders.Add("Accept-Version", "V2");
-        _httpClient.DefaultRequestHeaders.Add("Accept-Language", "ar");
-        // NOTE: Reporting API does NOT use Clearance-Status header (removed)
-        var authToken = Encoding.ASCII.GetBytes($"{_username}:{_password}");
-        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Basic",
-            Convert.ToBase64String(authToken)
-        );
+            using var req = new HttpRequestMessage(HttpMethod.Post, _zatcaUpload) { Content = content };
+            AddCommonHeaders(req, username, password, includeLanguage: true);
+            // NOTE: Reporting API does NOT use Clearance-Status header
 
-        HttpResponseMessage response = await _httpClient.PostAsync(zatcaUpload, content);
-        string responseBody = await response.Content.ReadAsStringAsync();
-        Console.WriteLine("[API#1] Reporting Response: " + responseBody);
+            var response = await _http.SendAsync(req);
+            string body  = await response.Content.ReadAsStringAsync();
+            Console.WriteLine("[API#1] Reporting Response: " + body);
 
-        return ParseInvoiceResponse(response.StatusCode, responseBody, "[API#1] Reporting");
+            return ParseInvoiceResponse(response.StatusCode, body, "[API#1] Reporting");
+        }, "[API#1] Reporting");
     }
 
+    // ── Private helpers ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Retries <paramref name="operation"/> up to <see cref="_maxRetries"/> times on
+    /// transient server errors (5xx) or network-level exceptions.
+    /// Duplicate-invoice responses (400 + IVS-DUP-001) are NOT retried.
+    /// </summary>
+    private async Task<TestUploadResponse?> ExecuteWithRetryAsync(
+        Func<Task<TestUploadResponse?>> operation,
+        string label
+    )
+    {
+        for (int attempt = 1; attempt <= _maxRetries + 1; attempt++)
+        {
+            try
+            {
+                var result = await operation();
+
+                // Do not retry on duplicates or parsed results — only on null (5xx / no body)
+                if (result != null) return result;
+
+                if (attempt <= _maxRetries)
+                {
+                    LogsFile.MessageZatca(
+                        $"{label} attempt {attempt}/{_maxRetries + 1} returned null — retrying in {_retryDelayMs} ms"
+                    );
+                    await Task.Delay(_retryDelayMs);
+                }
+            }
+            catch (HttpRequestException ex)
+            {
+                LogsFile.MessageZatca($"{label} attempt {attempt} network error: {ex.Message}");
+                if (attempt > _maxRetries) throw;
+                await Task.Delay(_retryDelayMs);
+            }
+            catch (TaskCanceledException ex) when (ex.InnerException is TimeoutException)
+            {
+                LogsFile.MessageZatca($"{label} attempt {attempt} timed out");
+                if (attempt > _maxRetries) throw;
+                await Task.Delay(_retryDelayMs);
+            }
+        }
+
+        LogsFile.MessageZatca($"{label} exhausted all {_maxRetries + 1} attempts — returning null");
+        return null;
+    }
+
+    /// <summary>Adds Accept-Version, Authorization (Basic), and optionally Accept-Language.</summary>
+    private static void AddCommonHeaders(
+        HttpRequestMessage req,
+        string username,
+        string password,
+        bool includeLanguage = false
+    )
+    {
+        req.Headers.Add("Accept", "application/json");
+        req.Headers.Add("Accept-Version", "V2");
+        if (includeLanguage)
+            req.Headers.Add("Accept-Language", "ar");
+
+        var token = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{username}:{password}"));
+        req.Headers.Authorization = new AuthenticationHeaderValue("Basic", token);
+    }
+
+    private static StringContent BuildJsonContent(object payload) =>
+        new(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
     // ─────────────────────────────────────────────────────────────────────────
-    // Shared helper — parses ZATCA invoice response for both Reporting & Clearance.
-    // Returns the parsed result even on HTTP 400 (duplicate or validation error),
-    // and sets IsDuplicate = true when error code IVS-DUP-001 is detected.
-    // Returns null only for unexpected non-400 failures (5xx, network errors, etc.)
+    // Shared invoice-response parser (handles 200, 202, 400 duplicate, 5xx)
     // ─────────────────────────────────────────────────────────────────────────
+
     private static TestUploadResponse? ParseInvoiceResponse(
         HttpStatusCode statusCode,
         string responseBody,
         string apiLabel
     )
     {
-        // Always try to parse — ZATCA sends useful body on 400 too
         TestUploadResponse? result = null;
         try
         {
             var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             result = JsonSerializer.Deserialize<TestUploadResponse>(responseBody, opts);
         }
-        catch
-        {
-            // Body was not valid JSON — fall through
-        }
+        catch { /* Non-JSON body — handled below */ }
 
         if (result == null)
         {
-            // Could not parse — only happens on 5xx / gateway errors
             if ((int)statusCode >= 500)
             {
                 LogsFile.MessageZatca($"{apiLabel} server error {statusCode}: {responseBody}");
-                return null;
+                return null; // Signals the retry loop to retry
             }
             result = new TestUploadResponse();
         }
 
-        result.HttpStatus   = statusCode;
-        result.RawResponse  = responseBody;
+        result.HttpStatus  = statusCode;
+        result.RawResponse = responseBody;
 
-        // Detect duplicate: ZATCA error code IVS-DUP-001
         bool isDuplicate = ContainsDuplicateError(responseBody);
         result.IsDuplicate = isDuplicate;
 
@@ -307,17 +335,15 @@ public class APIService : Zatca_Phase_II.Interfaces.IAPIService
         {
             LogsFile.MessageZatca(
                 $"{apiLabel}: DUPLICATE invoice detected (IVS-DUP-001). " +
-                $"The invoice was already submitted. Returning existing result."
+                "The invoice was already submitted. Returning existing result."
             );
-            // Return the result — the caller can decide whether to treat this as success
             return result;
         }
 
         if (!IsSuccessStatus(statusCode))
         {
             LogsFile.MessageZatca($"{apiLabel} failed [{statusCode}]: {responseBody}");
-            // Still return the parsed result (not null) so the caller sees ValidationResults
-            return result;
+            return result; // Non-null so caller can inspect ValidationResults
         }
 
         LogsFile.MessageZatca($"{apiLabel} success [{statusCode}]");
@@ -328,15 +354,26 @@ public class APIService : Zatca_Phase_II.Interfaces.IAPIService
         (int)code >= 200 && (int)code <= 299;
 
     /// <summary>
-    /// Checks whether the ZATCA response body contains a duplicate-invoice error.
-    /// ZATCA uses error code "IVS-DUP-001" and category "IVS" for duplicates.
-    /// The check is case-insensitive and works against both structured and raw JSON.
+    /// Detects ZATCA duplicate-invoice error code IVS-DUP-001.
+    /// Case-insensitive scan — works against both structured and raw JSON bodies.
     /// </summary>
-    private static bool ContainsDuplicateError(string responseBody)
+    private static bool ContainsDuplicateError(string body) =>
+        !string.IsNullOrWhiteSpace(body) &&
+        (body.Contains("IVS-DUP-001", StringComparison.OrdinalIgnoreCase) ||
+         body.Contains("DUPLICATE",   StringComparison.OrdinalIgnoreCase));
+
+    private static T? Deserialize<T>(string json) where T : class
     {
-        if (string.IsNullOrWhiteSpace(responseBody)) return false;
-        // Fast path: look for the known duplicate code string
-        return responseBody.Contains("IVS-DUP-001", StringComparison.OrdinalIgnoreCase)
-            || responseBody.Contains("DUPLICATE", StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            return JsonSerializer.Deserialize<T>(
+                json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
+            );
+        }
+        catch
+        {
+            return null;
+        }
     }
 }

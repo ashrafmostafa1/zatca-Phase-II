@@ -4,7 +4,29 @@
     <RootNamespace>Zatca_Phase_II</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Assembly metadata -->
+    <AssemblyName>Zatca.Phase2</AssemblyName>
+    <AssemblyVersion>2.0.0</AssemblyVersion>
+    <FileVersion>2.0.0</FileVersion>
+    <Version>2.0.0</Version>
+    <Authors>Easacc</Authors>
+    <Description>ZATCA Phase II e-invoicing integration library for ASP.NET Core / .NET 8</Description>
+    <!-- Generate XML doc comments for IntelliSense in consuming projects -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <!-- publish output -->
+    <PublishDir>publish</PublishDir>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Zatca.Phase2.Tests\**" />
+    <Compile Remove="Zatca.Phase2.Tests2\**" />
+    <EmbeddedResource Remove="Zatca.Phase2.Tests\**" />
+    <EmbeddedResource Remove="Zatca.Phase2.Tests2\**" />
+    <None Remove="Zatca.Phase2.Tests\**" />
+    <None Remove="Zatca.Phase2.Tests2\**" />
+  </ItemGroup>
+
   <ItemGroup>
     <Reference Include="ZATCA.EInvoice.SDK.Contracts">
       <HintPath>Zatca/ZATCA.EInvoice.SDK.Contracts.dll</HintPath>
@@ -16,13 +38,48 @@
       <HintPath>Zatca/BouncyCastle.Crypto.dll</HintPath>
     </Reference>
   </ItemGroup>
+
   <ItemGroup>
-    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.22" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore"           Version="8.0.22" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.1" />
-    <PackageReference Include="Serilog.AspNetCore" Version="8.0.3" />
-    <PackageReference Include="Serilog.Enrichers.Environment" Version="3.0.1" />
-    <PackageReference Include="Serilog.Enrichers.Process" Version="3.0.0" />
-    <PackageReference Include="Serilog.Enrichers.Thread" Version="4.0.0" />
-    <PackageReference Include="Serilog.Settings.Configuration" Version="8.0.4" />
+    <PackageReference Include="Serilog.AspNetCore"                      Version="8.0.3"  />
+    <PackageReference Include="Serilog.Enrichers.Environment"           Version="3.0.1"  />
+    <PackageReference Include="Serilog.Enrichers.Process"               Version="3.0.0"  />
+    <PackageReference Include="Serilog.Enrichers.Thread"                Version="4.0.0"  />
+    <PackageReference Include="Serilog.Settings.Configuration"          Version="8.0.4"  />
   </ItemGroup>
+
+  <!--
+    ═══════════════════════════════════════════════════════════════════════
+    Single-DLL merge via ilrepack global tool (Release builds only).
+    Run once to install: dotnet tool install -g dotnet-ilrepack
+    Then run: dotnet build -c Release   → produces Zatca.Phase2.Merged.dll
+    ═══════════════════════════════════════════════════════════════════════
+  -->
+  <Target Name="MergeDlls" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <PropertyGroup>
+      <_MergedOutput>$(OutputPath)Zatca.Phase2.Merged.dll</_MergedOutput>
+      <!-- The 'lib' flag lets ilrepack resolve transitive deps (Newtonsoft.Json, IKVM, etc.)
+           without embedding them. Only the 4 listed DLLs are merged into one file. -->
+      <_ILRepackArgs>--lib:$(OutputPath) --out:$(_MergedOutput) $(OutputPath)Zatca.Phase2.dll $(OutputPath)ZATCA.EInvoice.SDK.dll $(OutputPath)ZATCA.EInvoice.SDK.Contracts.dll $(OutputPath)BouncyCastle.Crypto.dll</_ILRepackArgs>
+    </PropertyGroup>
+
+    <Exec
+      Command="ilrepack $(_ILRepackArgs)"
+      IgnoreExitCode="true"
+      ConsoleToMsBuild="true"
+      ContinueOnError="true"
+    >
+      <Output TaskParameter="ExitCode" PropertyName="_ILRepackExitCode" />
+    </Exec>
+
+    <Message
+      Text="✅  Single merged DLL → $(_MergedOutput)"
+      Importance="High"
+      Condition="'$(_ILRepackExitCode)' == '0'" />
+
+    <Warning
+      Text="ilrepack global tool not found — skipping DLL merge. Run: dotnet tool install -g dotnet-ilrepack"
+      Condition="'$(_ILRepackExitCode)' != '0'" />
+  </Target>
 </Project>

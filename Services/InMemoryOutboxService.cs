@@ -1,54 +1,84 @@
-using System;
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
-using System.Threading;
 using System.Threading.Channels;
-using System.Threading.Tasks;
+using Microsoft.Extensions.Options;
 using Zatca_Phase_II.Eum;
+using Zatca_Phase_II.Helpers;
 using Zatca_Phase_II.Interfaces;
 using Zatca_Phase_II.Models;
 
 namespace Zatca_Phase_II.Services;
 
-public class InMemoryOutboxService : IOutboxEInvoiceService
+/// <summary>
+/// In-memory outbox backed by a bounded <see cref="Channel{T}"/>.
+///
+/// The POS calls <see cref="EnqueueAsync"/> immediately after the bill is saved
+/// to the database — this returns in microseconds.  The <see cref="ZatcaBackgroundWorker"/>
+/// drains the channel and talks to ZATCA in the background.
+///
+/// If the channel is full (<see cref="ZatcaOptions.OutboxCapacity"/> reached) the caller
+/// blocks until space is available, providing natural back-pressure.
+/// </summary>
+public sealed class InMemoryOutboxService : IOutboxEInvoiceService
 {
     private readonly Channel<InvoiceOutboxMessage> _channel;
 
+    public InMemoryOutboxService(IOptions<ZatcaOptions> options)
+        : this(options.Value) { }
+
     public InMemoryOutboxService(ZatcaOptions options)
     {
-        _channel = Channel.CreateBounded<InvoiceOutboxMessage>(new BoundedChannelOptions(options.OutboxCapacity)
-        {
-            FullMode = BoundedChannelFullMode.Wait
-        });
+        _channel = Channel.CreateBounded<InvoiceOutboxMessage>(
+            new BoundedChannelOptions(options.OutboxCapacity)
+            {
+                FullMode            = BoundedChannelFullMode.Wait,
+                SingleReader        = true,   // only the background worker reads
+                SingleWriter        = false,  // multiple POS threads may write
+                AllowSynchronousContinuations = false,
+            }
+        );
     }
 
-    public int PendingCount => _channel.Reader.Count;
-
-    public async Task EnqueueAsync(Bill bill, ZatcaBranch branch, EnvironmentTyp environment, CancellationToken ct = default)
+    /// <inheritdoc/>
+    public ValueTask EnqueueAsync(
+        Bill bill,
+        ZatcaBranch branch,
+        EnvironmentTyp environment,
+        CancellationToken ct = default
+    )
     {
         var message = new InvoiceOutboxMessage
         {
-            BillId = bill.Id,
-            Bill = bill,
+            BillId      = bill.Id,
+            Bill        = bill,
             ZatcaBranch = branch,
             Environment = environment,
-            CreatedAt = DateTime.UtcNow,
-            RetryCount = 0
         };
 
-        await _channel.Writer.WriteAsync(message, ct);
+        LogsFile.MessageZatca(
+            $"[Outbox] Enqueued bill #{bill.Id} (UUID: {bill.Uid}). " +
+            $"Pending: {_channel.Reader.Count + 1}"
+        );
+
+        return _channel.Writer.WriteAsync(message, ct);
     }
 
-    public async IAsyncEnumerable<InvoiceOutboxMessage> ConsumeAsync([EnumeratorCancellation] CancellationToken ct = default)
+    /// <inheritdoc/>
+    public async IAsyncEnumerable<InvoiceOutboxMessage> ConsumeAsync(
+        [EnumeratorCancellation] CancellationToken ct
+    )
     {
-        await foreach (var message in _channel.Reader.ReadAllAsync(ct))
+        await foreach (var msg in _channel.Reader.ReadAllAsync(ct))
         {
-            yield return message;
+            yield return msg;
         }
     }
 
-    public void CompleteAdding()
-    {
-        _channel.Writer.Complete();
-    }
+    /// <inheritdoc/>
+    public int PendingCount => _channel.Reader.Count;
+
+    /// <summary>
+    /// Signals that no more messages will be written.
+    /// Call this during application shutdown to allow the background worker to drain cleanly.
+    /// </summary>
+    public void CompleteAdding() => _channel.Writer.TryComplete();
 }
