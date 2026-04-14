@@ -9,7 +9,7 @@ using Zatca_Phase_II.Models;
 
 namespace Zatca_Phase_II.Services;
 
-public class APIService
+public class APIService : Zatca_Phase_II.Interfaces.IAPIService
 {
     private readonly string BaseUrl;
     private readonly string zatcaCompliance;
@@ -73,7 +73,8 @@ public class APIService
     )
     {
         using var _httpClient = new HttpClient();
-        var requestData = new { compliance_request_id };
+        // compliance_request_id is sent as a STRING per ZATCA API #4 spec
+        var requestData = new { compliance_request_id = long.Parse(compliance_request_id) };
         var jsonContent = JsonSerializer.Serialize(requestData);
         var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
@@ -88,6 +89,11 @@ public class APIService
 
         HttpResponseMessage response = await _httpClient.PostAsync(zatcaProd, content);
         string responseBody = await response.Content.ReadAsStringAsync();
+        // DIAGNOSTIC: log exact request sent to API #4
+        LogsFile.MessageZatca($"[DIAG][API#4] URL: {zatcaProd}");
+        LogsFile.MessageZatca($"[DIAG][API#4] Body: {jsonContent}");
+        LogsFile.MessageZatca($"[DIAG][API#4] Username (first 30): {_username?[..Math.Min(30, _username?.Length ?? 0)]}");
+        LogsFile.MessageZatca($"[DIAG][API#4] Response [{response.StatusCode}]: {responseBody}");
         Console.WriteLine("[API#4] Production CSID Response: " + responseBody);
         if (!response.IsSuccessStatusCode)
         {
@@ -183,7 +189,7 @@ public class APIService
             );
             return null;
         }
-        LogsFile.MessageZatca($"[API#6] Compliance Check success");
+        LogsFile.MessageZatca($"[API#6] Compliance Check success/body: {responseBody}");
         return JsonSerializer.Deserialize<TestUploadResponse>(responseBody);
     }
 

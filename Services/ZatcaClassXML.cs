@@ -37,6 +37,7 @@ namespace Zatca_Phase_II.Helpers
                 string ident =
                     "<Invoice xmlns=\"urn:oasis:names:specification:ubl:schema:xsd:Invoice-2\" xmlns:cac=\"urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2\" xmlns:cbc=\"urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2\" xmlns:ext=\"urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2\"></Invoice>";
                 XDocument doc = XDocument.Parse(ident);
+                XNamespace nsExt = "urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2";
                 XElement i = doc.Root!;
                 XNamespace nsCac = i.GetNamespaceOfPrefix("cac")!;
                 XNamespace nsCbc = i.GetNamespaceOfPrefix("cbc")!;
@@ -314,6 +315,17 @@ namespace Zatca_Phase_II.Helpers
                     )
                 );
 
+                // 1. UBLExtensions placeholder — required by the ZATCA SDK for digital signature injection
+                XElement ublExtensions = new XElement(
+                    nsExt + "UBLExtensions",
+                    new XElement(
+                        nsExt + "UBLExtension",
+                        new XElement(nsExt + "ExtensionURI", "urn:oasis:names:specification:ubl:dsig:enveloped:xades"),
+                        new XElement(nsExt + "ExtensionContent")
+                    )
+                );
+                i.AddFirst(ublExtensions);
+
                 i.Add(ProfileID);
                 i.Add(ID);
                 i.Add(UUID);
@@ -327,6 +339,30 @@ namespace Zatca_Phase_II.Helpers
                     i.Add(BillingReference);
                 i.Add(ICV);
                 i.Add(PIH);
+
+                // 2. QR placeholder — required by the ZATCA SDK to embed the QR code
+                XElement QR = new XElement(
+                    nsCac + "AdditionalDocumentReference",
+                    new XElement(nsCbc + "ID", "QR"),
+                    new XElement(
+                        nsCac + "Attachment",
+                        new XElement(
+                            nsCbc + "EmbeddedDocumentBinaryObject",
+                            "",
+                            new XAttribute(TextPlain)
+                        )
+                    )
+                );
+                i.Add(QR);
+
+                // 3. Signature element — required by the ZATCA SDK (UBL enveloped signature reference)
+                XElement Signature = new XElement(
+                    nsCac + "Signature",
+                    new XElement(nsCbc + "ID", "urn:oasis:names:specification:ubl:signature:Invoice"),
+                    new XElement(nsCbc + "SignatureMethod", "urn:oasis:names:specification:ubl:dsig:enveloped:xades")
+                );
+                i.Add(Signature);
+
                 i.Add(AccountingSupplierParty);
                 i.Add(AccountingCustomerParty);
                 i.Add(PaymentMeans);

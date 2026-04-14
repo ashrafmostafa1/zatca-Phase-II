@@ -1,3 +1,4 @@
+namespace Zatca_Phase_II.Eum;
 public enum NoticeType
 {
     Regular = 0,

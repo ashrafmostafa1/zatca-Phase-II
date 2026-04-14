@@ -49,18 +49,27 @@ public class DefaultXML()
         XNamespace ns = "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2";
         XNamespace cac = "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2";
         XNamespace cbc = "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2";
+        XNamespace ext = "urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2";
 
         var doc = new XDocument(
             new XElement(
                 ns + "Invoice",
                 new XAttribute(XNamespace.Xmlns + "cac", cac),
                 new XAttribute(XNamespace.Xmlns + "cbc", cbc),
+                new XAttribute(XNamespace.Xmlns + "ext", ext),
+                // UBLExtensions MUST be the first child — required by ZATCA SDK for signature injection
+                new XElement(ext + "UBLExtensions",
+                    new XElement(ext + "UBLExtension",
+                        new XElement(ext + "ExtensionURI", "urn:oasis:names:specification:ubl:dsig:enveloped:xades"),
+                        new XElement(ext + "ExtensionContent")
+                    )
+                ),
                 new XElement(cbc + "ProfileID", "reporting:1.0"),
                 new XElement(cbc + "ID", "935"),
                 new XElement(cbc + "UUID", uuid),
                 new XElement(cbc + "IssueDate", Date.ToString("yyyy-MM-dd")),
                 new XElement(cbc + "IssueTime", Date.ToString("HH:mm:ss")),
-                new XElement(cbc + "InvoiceTypeCode", new XAttribute("name", type), "381"),
+                new XElement(cbc + "InvoiceTypeCode", new XAttribute("name", type), "383"),
                 new XElement(cbc + "DocumentCurrencyCode", "SAR"),
                 new XElement(cbc + "TaxCurrencyCode", "SAR"),
                 new XElement(
@@ -308,18 +317,27 @@ public class DefaultXML()
         XNamespace ns = "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2";
         XNamespace cac = "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2";
         XNamespace cbc = "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2";
+        XNamespace ext = "urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2";
 
         var doc = new XDocument(
             new XElement(
                 ns + "Invoice",
                 new XAttribute(XNamespace.Xmlns + "cac", cac),
                 new XAttribute(XNamespace.Xmlns + "cbc", cbc),
+                new XAttribute(XNamespace.Xmlns + "ext", ext),
+                // UBLExtensions MUST be the first child — required by ZATCA SDK for signature injection
+                new XElement(ext + "UBLExtensions",
+                    new XElement(ext + "UBLExtension",
+                        new XElement(ext + "ExtensionURI", "urn:oasis:names:specification:ubl:dsig:enveloped:xades"),
+                        new XElement(ext + "ExtensionContent")
+                    )
+                ),
                 new XElement(cbc + "ProfileID", "reporting:1.0"),
                 new XElement(cbc + "ID", "935"),
                 new XElement(cbc + "UUID", uuid),
                 new XElement(cbc + "IssueDate", Date.ToString("yyyy-MM-dd")),
                 new XElement(cbc + "IssueTime", Date.ToString("HH:mm:ss")),
-                new XElement(cbc + "InvoiceTypeCode", new XAttribute("name", type), "383"),
+                new XElement(cbc + "InvoiceTypeCode", new XAttribute("name", type), "381"),
                 new XElement(cbc + "DocumentCurrencyCode", "SAR"),
                 new XElement(cbc + "TaxCurrencyCode", "SAR"),
                 new XElement(

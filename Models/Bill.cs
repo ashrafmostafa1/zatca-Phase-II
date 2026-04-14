@@ -1,3 +1,5 @@
+using Zatca_Phase_II.Eum;
+
 namespace Zatca_Phase_II.Models;
 
 public class Bill
@@ -38,4 +40,5 @@ public class Bill
     public string ParentCode { get; set; } = string.Empty;
     public CustomerORSupplier Customer { get; set; } = new CustomerORSupplier();
     public CustomerORSupplier Supplier { get; set; } = new CustomerORSupplier();
+    public string PreviousInvoiceHash { get; set; } = string.Empty;
 }

@@ -44,15 +44,22 @@ public class CSRGenerator(IHostEnvironment hostingEnvironment, bool isSimulation
             if (result.IsValid)
             {
                 LogsFile.MessageZatca($"is Valid CSR");
+                // DIAGNOSTIC: log the first 200 chars of the generated CSR to verify embedded TaxNumber
+                LogsFile.MessageZatca($"[DIAG] CSR (first 200): {result.Csr?[..Math.Min(200, result.Csr.Length)]}");
                 var ret = await _apiService.SubmitComplianceRequestAsync(result.Csr, obj.Otp);
                 if (ret is null)
                 {
                     LogsFile.MessageZatca($"Error SubmitComplianceRequestAsync");
                     return (null, null);
                 }
+                // DIAGNOSTIC: log requestID and decoded compliance certificate Subject (contains TaxNumber)
+                LogsFile.MessageZatca($"[DIAG] RequestID={ret.RequestID}, Token length={ret.BinarySecurityToken?.Length}");
                 var base64Token = Encoding.UTF8.GetString(
                     Convert.FromBase64String(ret.BinarySecurityToken)
                 );
+                // Log the full decoded cert so we can inspect SubjectAltName (contains TaxNumber OID)
+                LogsFile.MessageZatca($"[DIAG] DecodedCert FULL: {base64Token}");
+
 
                 var UUIDS = new
                 {
@@ -131,7 +138,7 @@ public class CSRGenerator(IHostEnvironment hostingEnvironment, bool isSimulation
                 
                 var retProd = await _apiService.SubmitProductionRequestAsync(
                     ret.RequestID.ToString(),
-                    ret.BinarySecurityToken,
+                    ret.BinarySecurityToken,  // raw base64 token for API#4 Basic Auth
                     ret.Secret
                 );
                 Console.WriteLine(ret.BinarySecurityToken?.Length);

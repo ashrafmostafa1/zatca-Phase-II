@@ -33,6 +33,7 @@ public class SignsService(IHostEnvironment hostingEnvironment, bool isSimulation
         else
         {
             LogsFile.MessageZatca($"Error Sign {signRes.ErrorMessage}");
+            return Task.FromResult<(string?, string?, string?, object?)>((null, null, null, null));
         }
         XmlNamespaceManager nsManager = new XmlNamespaceManager(signRes.SignedEInvoice.NameTable);
         nsManager.AddNamespace(
